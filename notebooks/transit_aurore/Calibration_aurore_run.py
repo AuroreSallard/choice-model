@@ -58,15 +58,21 @@ def read_reference(parameters):
     parameters["modes"] = modes
     parameters["max_nb_transfers"] = maximum_transfers
 
-    transfer_columns = [col for col in df_reference.columns if "->" in col]
-    intramodal_transfer_columns = [col for col in transfer_columns if col.split("->")[0] == col.split("->")[1] ]
-    intermodal_transfer_columns = [col for col in transfer_columns if not col in intramodal_transfer_columns]
+    #transfer_columns = [col for col in df_reference.columns if "->" in col]
+    #intramodal_transfer_columns = [col for col in transfer_columns if col.split("->")[0] == col.split("->")[1] ]
+    #intermodal_transfer_columns = [col for col in transfer_columns if not col in intramodal_transfer_columns]
 
-    df_reference["intramodal_transfers"] = df_reference[intramodal_transfer_columns].sum(axis=1)
-    df_reference["intermodal_transfers"] = df_reference[intermodal_transfer_columns].sum(axis=1)
+    rail_to_other_columns = ["rail->bus", "rail->tram", "tram->rail", "bus->rail"]
+    rail_to_rail_columns  = ["rail->rail"]
+    other_to_other_columns = ["bus->bus", "bus->tram", "tram->tram", "tram->bus"]
+
+    df_reference["rail_transfers"] = df_reference[rail_to_rail_columns].sum(axis=1)
+    df_reference["other_transfers"] = df_reference[other_to_other_columns].sum(axis=1)
+    df_reference["intermodal_transfers"] = df_reference[rail_to_other_columns].sum(axis=1)
 
     parameters["max_nb_transfers_intermodal"] = df_reference["intermodal_transfers"].max()
-    parameters["max_nb_transfers_intramodal"] = df_reference["intramodal_transfers"].max()
+    parameters["max_nb_transfers_rail"] = df_reference["rail_transfers"].max()
+    parameters["max_nb_transfers_other"] = df_reference["other_transfers"].max()
 
     return parameters, df_reference
 
@@ -91,13 +97,20 @@ def create_requests(df_reference):
 
 def count_transfers(modes):
     intermodal = 0
-    intramodal = 0
+    rail = 0
+    other = 0
     for i in range(len(modes) - 1):
         if modes[i] == modes[i + 1]:
-            intramodal += 1
+            if  modes[i] == "rail":
+                rail += 1
+            else:
+                other += 1
         else:
-            intermodal += 1
-    return intermodal, intramodal
+            if modes[i] == "rail" or modes[i+1] == "rail":
+                intermodal += 1
+            else:
+                other += 1
+    return intermodal, rail, other
 
 
 # Prepare querying the routing server
@@ -112,8 +125,9 @@ def query_endpoint(parameters, requests, utilities):
     df_response = { 
         "request_index": [],
         "transfers": [],
-        "intermodal_transfers": [],
-        "intramodal_transfers": []
+        "rail_transfers": [],
+        "other_transfers": [],
+        "intermodal_transfers": []
     }
 
     modes_and_subway = parameters["modes"].copy()
@@ -136,9 +150,10 @@ def query_endpoint(parameters, requests, utilities):
                 if mode in row["vehicle_legs_by_mode"]:
                     df_response["legs_tram"][-1] += row["vehicle_legs_by_mode"][mode]
 
-        transfers_intermodal, transfers_intramodal = count_transfers(row["modes_sequence"])
+        transfers_intermodal, transfers_rail, transfers_other = count_transfers(row["modes_sequence"])
         df_response["intermodal_transfers"].append(transfers_intermodal)
-        df_response["intramodal_transfers"].append(transfers_intramodal)
+        df_response["rail_transfers"].append(transfers_rail)
+        df_response["other_transfers"].append(transfers_other)
 
     df_response = pd.DataFrame(df_response)
     return df_response
@@ -224,7 +239,8 @@ def calculate_objective_distribution_based(parameters, df_reference, df_evaluati
     if parameters["evaluate_intermodality"]:
 
         max_intermodal_transfers = parameters["max_nb_transfers_intermodal"]
-        max_intramodal_transfers = parameters["max_nb_transfers_intramodal"]
+        max_rail_transfers = parameters["max_nb_transfers_rail"]
+        max_other_transfers = parameters["max_nb_transfers_other"]
 
         reference_inter_transfer_distribution = []
         evaluation_inter_transfer_distribution = []
@@ -239,24 +255,41 @@ def calculate_objective_distribution_based(parameters, df_reference, df_evaluati
         reference_inter_transfer_distribution = np.array(reference_inter_transfer_distribution) / np.sum(reference_inter_transfer_distribution)
         evaluation_inter_transfer_distribution = np.array(evaluation_inter_transfer_distribution) / np.sum(evaluation_inter_transfer_distribution)
 
-        reference_intra_transfer_distribution = []
-        evaluation_intra_transfer_distribution = []
+        reference_rail_transfer_distribution = []
+        evaluation_rail_transfer_distribution = []
 
-        for transfers in range(max_intramodal_transfers + 1):
-            f_reference = df_evaluation["intramodal_transfers_reference"] == transfers
-            reference_intra_transfer_distribution.append(df_evaluation.loc[f_reference, "weight"].sum())
+        for transfers in range(max_rail_transfers + 1):
+            f_reference = df_evaluation["rail_transfers_reference"] == transfers
+            reference_rail_transfer_distribution.append(df_evaluation.loc[f_reference, "weight"].sum())
 
-            f_evaluation = df_evaluation["intramodal_transfers_evaluation"] == transfers
-            evaluation_intra_transfer_distribution.append(df_evaluation.loc[f_evaluation, "weight"].sum())
+            f_evaluation = df_evaluation["rail_transfers_evaluation"] == transfers
+            evaluation_rail_transfer_distribution.append(df_evaluation.loc[f_evaluation, "weight"].sum())
 
-        reference_intra_transfer_distribution = np.array(reference_intra_transfer_distribution) / np.sum(reference_intra_transfer_distribution)
-        evaluation_intra_transfer_distribution = np.array(evaluation_intra_transfer_distribution) / np.sum(evaluation_intra_transfer_distribution)
+        reference_rail_transfer_distribution = np.array(reference_rail_transfer_distribution) / np.sum(reference_rail_transfer_distribution)
+        evaluation_rail_transfer_distribution = np.array(evaluation_rail_transfer_distribution) / np.sum(evaluation_rail_transfer_distribution)
+
+        reference_other_transfer_distribution = []
+        evaluation_other_transfer_distribution = []
+
+        for transfers in range(max_other_transfers + 1):
+            f_reference = df_evaluation["other_transfers_reference"] == transfers
+            reference_other_transfer_distribution.append(df_evaluation.loc[f_reference, "weight"].sum())
+
+            f_evaluation = df_evaluation["other_transfers_evaluation"] == transfers
+            evaluation_other_transfer_distribution.append(df_evaluation.loc[f_evaluation, "weight"].sum())
+
+        reference_other_transfer_distribution = np.array(reference_other_transfer_distribution) / np.sum(reference_other_transfer_distribution)
+        evaluation_other_transfer_distribution = np.array(evaluation_other_transfer_distribution) / np.sum(evaluation_other_transfer_distribution)
 
         mode_distribution_offset = np.abs(reference_mode_distribution - evaluation_mode_distribution)
-        intermodal_transfer_distribution_offset = np.abs(reference_inter_transfer_distribution - evaluation_inter_transfer_distribution)
-        intramodal_transfer_distribution_offset = np.abs(reference_intra_transfer_distribution - evaluation_intra_transfer_distribution)
 
-        return transfers_weight * np.sum(intermodal_transfer_distribution_offset) + transfers_weight * np.sum(intramodal_transfer_distribution_offset) + modes_weight * np.sum(mode_distribution_offset)
+        intermodal_transfer_distribution_offset = np.abs(reference_inter_transfer_distribution - evaluation_inter_transfer_distribution)
+        rail_transfer_distribution_offset = np.abs(reference_rail_transfer_distribution - evaluation_rail_transfer_distribution)
+        other_transfer_distribution_offset = np.abs(reference_other_transfer_distribution - evaluation_other_transfer_distribution)
+
+        transfer_distribution_offset = np.sum(intermodal_transfer_distribution_offset) + np.sum(rail_transfer_distribution_offset) + np.sum(other_transfer_distribution_offset)
+
+        return transfers_weight * transfer_distribution_offset + modes_weight * np.sum(mode_distribution_offset)
     
     else:
          
@@ -293,7 +326,8 @@ def initialize_variables():
         { "name": "walk_u_h", "initial": -1.97 },
         { "name": "transfer_u", "initial": 0.0, "fixed": True },
         { "name": "raptorPenalties:transfer_intermodal", "initial": 0.39},
-        { "name": "raptorPenalties:transfer_intramodal", "initial": 0.39},
+        { "name": "raptorPenalties:transfer_rail", "initial": 0.37},
+        { "name": "raptorPenalties:transfer_other", "initial": 0.4},
     ]
 
     # Extend with index information for CMA-ES evaluation
@@ -430,14 +464,20 @@ if __name__=="__main__":
                         if "transfer_intermodal" in key:
                             for themode1 in ["tram", "bus", "rail"]:
                                 for themode2 in ["tram", "bus", "rail"]:
-                                    if themode1 != themode2:
+                                    if themode1 != themode2 and "rail" in [themode1, themode2]:
                                         penalties.append(f"--raptorPenalties:transfer_{themode1}_to_{themode2}")
                                         penalties.append(str(value))
                             
-                        if "transfer_intramodal" in key:
-                            for themode in ["tram", "bus", "rail"]:
-                                penalties.append(f"--raptorPenalties:transfer_{themode}_to_{themode}")
-                                penalties.append(str(value))
+                        if "transfer_rail" in key:
+                            themode = "rail"
+                            penalties.append(f"--raptorPenalties:transfer_{themode}_to_{themode}")
+                            penalties.append(str(value))
+
+                        if "transfer_other" in key:
+                            for themode1 in ["tram", "bus"]:
+                                for themode2 in ["tram", "bus"]:
+                                    penalties.append(f"--raptorPenalties:transfer_{themode1}_to_{themode2}")
+                                    penalties.append(str(value))
 
                 server_proc = subprocess.Popen(["java", "-cp", jar_path, "org.eqasim.server.RunServer",
                                          "--config-path", "/home/asallard/Euler_project/inputs/1pct_pt_simulated/switzerland_config_baseline.xml",
